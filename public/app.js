@@ -41,8 +41,12 @@ import {
   where,
   getDocs,
   onSnapshot,
-  serverTimestamp
+  serverTimestamp,
+  Timestamp,
+  updateDoc
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+const INVITE_CODE_VALID_DAYS = 7;
 
 // ──────────────────────────────────
 // FIREBASE
@@ -126,20 +130,35 @@ const DataLayer = {
     return Math.random().toString(36).substring(2, 8).toUpperCase();
   },
 
-  async createWorkspace(name, ownerUid) {
-    const inviteCode = this._generateInviteCode();
-    // Garante unicidade do código (raro mas possível)
-    const existing = await getDocs(
-      query(collection(db, 'workspaces'), where('inviteCode', '==', inviteCode))
-    );
-    const finalCode = existing.empty ? inviteCode : this._generateInviteCode() + '1';
+  _inviteExpiry() {
+    const d = new Date();
+    d.setDate(d.getDate() + INVITE_CODE_VALID_DAYS);
+    return Timestamp.fromDate(d);
+  },
+
+  async _uniqueInviteCode() {
+    // Tenta gerar um código não usado por até 5 tentativas (evita colisão)
+    for (let i = 0; i < 5; i++) {
+      const code = this._generateInviteCode();
+      const existing = await getDocs(
+        query(collection(db, 'workspaces'), where('inviteCode', '==', code))
+      );
+      if (existing.empty) return code;
+    }
+    // Extremamente improvável de chegar aqui, mas garante um código único
+    return this._generateInviteCode() + Date.now().toString(36).slice(-2).toUpperCase();
+  },
+
+  async createWorkspace(name, ownerUid, ownerName, ownerEmail) {
+    const inviteCode = await this._uniqueInviteCode();
 
     const ref = await addDoc(collection(db, 'workspaces'), {
       name,
-      ownerId:    ownerUid,
-      inviteCode: finalCode,
-      createdAt:  serverTimestamp(),
-      // members: [] ← futuro: array de uids para controle avançado
+      ownerId:              ownerUid,
+      inviteCode,
+      inviteCodeActive:     true,
+      inviteCodeExpiresAt:  this._inviteExpiry(),
+      createdAt:            serverTimestamp(),
     });
 
     // Cria ou atualiza o doc do usuário com workspaceId e role owner
@@ -149,10 +168,19 @@ const DataLayer = {
       role:        'owner',
     }, { merge: true });
 
-    return { id: ref.id, name, ownerId: ownerUid, inviteCode: finalCode };
+    // Registra o owner na subcoleção de membros (para listagem/gestão de equipe)
+    await setDoc(doc(db, 'workspaces', ref.id, 'members', ownerUid), {
+      uid:       ownerUid,
+      name:      ownerName || '',
+      email:     ownerEmail || '',
+      role:      'owner',
+      joinedAt:  serverTimestamp(),
+    });
+
+    return { id: ref.id, name, ownerId: ownerUid, inviteCode };
   },
 
-  async joinWorkspace(inviteCode, uid, userName) {
+  async joinWorkspace(inviteCode, uid, userName, userEmail) {
     // Busca workspace pelo código
     const q    = query(collection(db, 'workspaces'), where('inviteCode', '==', inviteCode.trim().toUpperCase()));
     const snap = await getDocs(q);
@@ -162,13 +190,60 @@ const DataLayer = {
     const wsDoc = snap.docs[0];
     const ws    = { id: wsDoc.id, ...wsDoc.data() };
 
+    if (ws.inviteCodeActive === false) {
+      throw new Error('Este código de convite foi desativado pelo responsável do salão. Peça um novo código.');
+    }
+    if (ws.inviteCodeExpiresAt && ws.inviteCodeExpiresAt.toDate() < new Date()) {
+      throw new Error('Este código de convite expirou. Peça um novo código para o responsável do salão.');
+    }
+
     // Cria ou atualiza o doc do usuário com workspaceId e role member
     await setDoc(doc(db, 'users', uid), {
       workspaceId: ws.id,
       role:        'member',
     }, { merge: true });
 
+    // Registra o membro na subcoleção de equipe do workspace
+    await setDoc(doc(db, 'workspaces', ws.id, 'members', uid), {
+      uid,
+      name:      userName || '',
+      email:     userEmail || '',
+      role:      'member',
+      joinedAt:  serverTimestamp(),
+    });
+
     return { id: ws.id, name: ws.name, ownerId: ws.ownerId, inviteCode: ws.inviteCode };
+  },
+
+  // Gera um novo código, invalidando o anterior (revogação implícita)
+  async regenerateInviteCode(workspaceId) {
+    const newCode = await this._uniqueInviteCode();
+    const expiresAt = this._inviteExpiry();
+    await updateDoc(doc(db, 'workspaces', workspaceId), {
+      inviteCode:           newCode,
+      inviteCodeActive:     true,
+      inviteCodeExpiresAt:  expiresAt,
+    });
+    return { inviteCode: newCode, inviteCodeExpiresAt: expiresAt };
+  },
+
+  // Desativa o código atual sem gerar um novo (pausa convites)
+  async deactivateInviteCode(workspaceId) {
+    await updateDoc(doc(db, 'workspaces', workspaceId), { inviteCodeActive: false });
+  },
+
+  async listMembers(workspaceId) {
+    const snap = await getDocs(collection(db, 'workspaces', workspaceId, 'members'));
+    return snap.docs.map(d => ({ id: d.id, ...d.data() }));
+  },
+
+  // Remove um membro do workspace (não permite remover o owner)
+  async removeMember(workspaceId, memberUid) {
+    await deleteDoc(doc(db, 'workspaces', workspaceId, 'members', memberUid));
+    await setDoc(doc(db, 'users', memberUid), {
+      workspaceId: null,
+      role:        null,
+    }, { merge: true });
   },
 
   async getWorkspace(workspaceId) {
@@ -179,7 +254,54 @@ const DataLayer = {
 
   /* ── APPOINTMENTS ── */
 
+  // Valida conflito de horário ANTES de salvar (Opção 1: client-side)
+  async _checkTimeConflict(newAppt) {
+    // Procura agendamentos do mesmo profissional no mesmo dia
+    const q = query(
+      collection(db, 'appointments'),
+      where('date', '==', newAppt.date),
+      where('professionalUid', '==', newAppt.professionalUid),
+      where('workspaceId', '==', newAppt.workspaceId)
+    );
+    
+    const snap = await getDocs(q);
+    const existing = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    
+    // Converte "HH:MM" para minutos
+    const toMin = (timeStr) => {
+      const [h, m] = timeStr.split(':').map(Number);
+      return h * 60 + m;
+    };
+    
+    // Duração padrão: 60 minutos (ajuste conforme sua necessidade)
+    const DEFAULT_DURATION_MIN = 60;
+    
+    const newStart = toMin(newAppt.startTime);
+    const newEnd = newStart + DEFAULT_DURATION_MIN;
+    
+    // Procura por overlap: newStart < existEnd E newEnd > existStart
+    for (const appt of existing) {
+      const existStart = toMin(appt.startTime);
+      const existEnd = existStart + DEFAULT_DURATION_MIN;
+      
+      if (newStart < existEnd && newEnd > existStart) {
+        return appt; // Retorna o agendamento conflitante
+      }
+    }
+    
+    return null; // Sem conflito
+  },
+
   async addAppointment(data) {
+    // Verifica conflito ANTES de criar
+    const conflict = await this._checkTimeConflict(data);
+    if (conflict) {
+      throw new Error(
+        `Conflito de horário: você já tem agendamento com ${escHtml(conflict.clientName)} às ${conflict.startTime}. ` +
+        `Escolha outro horário ou outro profissional.`
+      );
+    }
+
     const ref = await addDoc(collection(db, 'appointments'), {
       ...data,
       createdAt: serverTimestamp(),
@@ -358,7 +480,7 @@ async function handleCreateWorkspace() {
   if (!name) return showWsError('Informe o nome do seu salão.');
   try {
     setWsLoading(true);
-    const ws = await DataLayer.createWorkspace(name, State.currentUser.uid);
+    const ws = await DataLayer.createWorkspace(name, State.currentUser.uid, State.currentUser.name, State.currentUser.email);
     State.currentWorkspace           = ws;
     State.currentUser.workspaceId    = ws.id;
     State.currentUser.role           = 'owner';
@@ -374,9 +496,12 @@ async function handleCreateWorkspace() {
 async function handleJoinWorkspace() {
   const code = document.getElementById('ws-invite-code').value.trim();
   if (!code) return showWsError('Digite o código de convite.');
+  if (State.currentUser.workspaceId) {
+    return showWsError('Você já pertence a um salão. Fale com o suporte para trocar de workspace.');
+  }
   try {
     setWsLoading(true);
-    const ws = await DataLayer.joinWorkspace(code, State.currentUser.uid, State.currentUser.name);
+    const ws = await DataLayer.joinWorkspace(code, State.currentUser.uid, State.currentUser.name, State.currentUser.email);
     State.currentWorkspace        = ws;
     State.currentUser.workspaceId = ws.id;
     State.currentUser.role        = 'member';
@@ -462,6 +587,94 @@ function copyWorkspaceCode() {
     showToast(`Código ${State.currentWorkspace.inviteCode} copiado!`, 'success');
   });
   closeDropdown();
+}
+
+// ──────────────────────────────────
+// GESTÃO DE EQUIPE E CONVITE (owner)
+// ──────────────────────────────────
+async function openTeamModal() {
+  closeDropdown();
+  openModal('modal-team');
+  await refreshTeamModal();
+}
+
+async function refreshTeamModal() {
+  const ws = State.currentWorkspace;
+  if (!ws) return;
+
+  // Recarrega dados atualizados do workspace (código/expiração podem ter mudado)
+  const fresh = await DataLayer.getWorkspace(ws.id);
+  if (fresh) State.currentWorkspace = { ...ws, ...fresh };
+
+  const codeEl   = document.getElementById('team-code-display');
+  const statusEl = document.getElementById('team-code-status');
+  if (codeEl)   codeEl.textContent = State.currentWorkspace.inviteCode || '—';
+
+  if (statusEl) {
+    const active = State.currentWorkspace.inviteCodeActive !== false;
+    const expiresAt = State.currentWorkspace.inviteCodeExpiresAt;
+    const expired = expiresAt && typeof expiresAt.toDate === 'function' && expiresAt.toDate() < new Date();
+    if (!active) {
+      statusEl.textContent = 'Convite desativado — gere um novo código para voltar a convidar.';
+      statusEl.className = 'team-code-status danger';
+    } else if (expired) {
+      statusEl.textContent = 'Este código expirou. Gere um novo código.';
+      statusEl.className = 'team-code-status danger';
+    } else if (expiresAt && typeof expiresAt.toDate === 'function') {
+      const d = expiresAt.toDate();
+      statusEl.textContent = `Válido até ${String(d.getDate()).padStart(2,'0')}/${String(d.getMonth()+1).padStart(2,'0')}/${d.getFullYear()}`;
+      statusEl.className = 'team-code-status';
+    } else {
+      statusEl.textContent = '';
+    }
+  }
+
+  try {
+    const members = await DataLayer.listMembers(ws.id);
+    renderTeamMembers(members);
+  } catch (e) {
+    showToast('Erro ao carregar equipe: ' + e.message, 'error');
+  }
+}
+
+function renderTeamMembers(members) {
+  const list = document.getElementById('team-members-list');
+  if (!list) return;
+  const sorted = [...members].sort((a, b) => (a.role === 'owner' ? -1 : 1) - (b.role === 'owner' ? -1 : 1));
+  list.innerHTML = sorted.map(m => `
+    <div class="team-member-row">
+      <div class="team-member-avatar">${escHtml(getInitials(m.name || m.email || '?'))}</div>
+      <div class="team-member-info">
+        <strong>${escHtml(m.name || '—')}</strong>
+        <small>${escHtml(m.email || '')} · ${m.role === 'owner' ? 'Responsável' : 'Profissional'}</small>
+      </div>
+      ${m.role !== 'owner' ? `<button class="btn-icon-remove" title="Remover da equipe" onclick="handleRemoveMember('${m.uid}')">×</button>` : ''}
+    </div>
+  `).join('') || '<p style="font-size:.85rem;color:var(--text-muted);text-align:center;padding:12px 0">Nenhum membro ainda.</p>';
+}
+
+async function handleRegenerateCode() {
+  if (!State.currentWorkspace) return;
+  if (!confirm('Gerar um novo código invalida o código atual. Quem ainda não entrou precisará do novo código. Continuar?')) return;
+  try {
+    await DataLayer.regenerateInviteCode(State.currentWorkspace.id);
+    showToast('Novo código gerado!', 'success');
+    await refreshTeamModal();
+  } catch (e) {
+    showToast('Erro ao gerar novo código: ' + e.message, 'error');
+  }
+}
+
+async function handleRemoveMember(uid) {
+  if (!State.currentWorkspace) return;
+  if (!confirm('Remover esta pessoa da equipe? Ela perderá acesso à agenda deste salão.')) return;
+  try {
+    await DataLayer.removeMember(State.currentWorkspace.id, uid);
+    showToast('Membro removido.', 'success');
+    await refreshTeamModal();
+  } catch (e) {
+    showToast('Erro ao remover membro: ' + e.message, 'error');
+  }
 }
 
 // ──────────────────────────────────
@@ -569,7 +782,7 @@ function renderCalendar() {
       html += `<div class="appointment-block appt-color-${prof.colorIdx}"
         style="top:${appt.top}%;left:calc(${leftPct}% + 4px);width:calc(${widthPct}% - 8px);height:${appt.height}px;"
         onclick="event.stopPropagation();openDetail('${appt.id}')"
-        title="${appt.clientName} — ${appt.procedure}">
+        title="${escHtml(appt.clientName)} — ${escHtml(appt.procedure)}">
         <div class="appt-name">${escHtml(appt.clientName)}</div>
         <div class="appt-proc">${escHtml(appt.procedure)}</div>
         <div class="appt-time">${appt.startTime}</div>
@@ -780,6 +993,41 @@ function openDatePicker() {
 }
 
 // ──────────────────────────────────
+// VALIDAÇÃO DE CONFLITO (real-time)
+// ──────────────────────────────────
+async function checkConflictPreview() {
+  const start = document.getElementById('f-start').value;
+  if (!start) return;
+  
+  const dateStr = formatDate(State.currentDate);
+  const data = {
+    date: dateStr,
+    startTime: start,
+    professionalUid: State.currentUser.uid,
+    workspaceId: State.currentUser.workspaceId,
+    clientName: '',
+  };
+  
+  const conflict = await DataLayer._checkTimeConflict(data);
+  let preview = document.getElementById('conflict-preview');
+  
+  if (!preview) {
+    preview = document.createElement('div');
+    preview.id = 'conflict-preview';
+    preview.style.cssText = 'font-size:.78rem;margin-top:6px;font-weight:500;';
+    document.getElementById('f-start').parentElement?.appendChild(preview);
+  }
+  
+  if (conflict) {
+    preview.textContent = `⚠️ Conflito: já há agendamento com ${escHtml(conflict.clientName)} às ${conflict.startTime}`;
+    preview.style.color = '#C0394B';
+  } else {
+    preview.textContent = '✓ Horário livre';
+    preview.style.color = '#2D7A3E';
+  }
+}
+
+// ──────────────────────────────────
 // HELPERS PUROS
 // ──────────────────────────────────
 function formatDate(d) {
@@ -808,6 +1056,9 @@ window.addEventListener('DOMContentLoaded', () => {
   document.getElementById('login-email')?.addEventListener('keydown',    e => { if(e.key==='Enter') handleLogin(); });
   document.getElementById('ws-invite-code')?.addEventListener('keydown', e => { if(e.key==='Enter') handleJoinWorkspace(); });
   document.getElementById('ws-name')?.addEventListener('keydown',        e => { if(e.key==='Enter') handleCreateWorkspace(); });
+  
+  // Validação em tempo real de conflito de horário
+  document.getElementById('f-start')?.addEventListener('change', checkConflictPreview);
 });
 
 // Expõe funções para o HTML inline
@@ -832,3 +1083,8 @@ window.deleteAppointment     = deleteAppointment;
 window.openModal             = openModal;
 window.closeModal            = closeModal;
 window.toggleUserMenu        = toggleUserMenu;
+window.openTeamModal         = openTeamModal;
+window.handleRegenerateCode  = handleRegenerateCode;
+window.handleRemoveMember    = handleRemoveMember;
+window.copyWorkspaceCode     = copyWorkspaceCode;
+window.checkConflictPreview  = checkConflictPreview;

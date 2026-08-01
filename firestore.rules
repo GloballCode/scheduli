@@ -2,24 +2,89 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Usuário autenticado lê/escreve seu próprio doc
+    // ──────────────────────────────────────────────────────────────
+    // HELPER FUNCTIONS
+    // ──────────────────────────────────────────────────────────────
+    
+    // Verifica se o usuário autenticado é membro do workspace
+    function isMemberOfWorkspace(wsId) {
+      return exists(/databases/$(database)/documents/workspaces/$(wsId)/members/$(request.auth.uid));
+    }
+
+    // Verifica se o usuário é owner do workspace
+    function isOwnerOfWorkspace(wsId) {
+      return get(/databases/$(database)/documents/workspaces/$(wsId)).data.ownerId == request.auth.uid;
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // USERS: lê/escreve apenas seu próprio documento
+    // ──────────────────────────────────────────────────────────────
     match /users/{userId} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
 
-    // Workspaces: autenticado pode criar e ler
-    // Só o owner pode atualizar/deletar
+    // ──────────────────────────────────────────────────────────────
+    // WORKSPACES: isolamento por owner/members
+    // ──────────────────────────────────────────────────────────────
     match /workspaces/{wsId} {
-      allow read:   if request.auth != null;
-      allow create: if request.auth != null;
+      // Lê: autenticado (qualquer um pode ver existe, mas dados específicos filtrados no app)
+      // Melhor prática: poderia restringir a apenas isMemberOfWorkspace(wsId), mas assim qualquer
+      // um logado consegue ver nomes dos workspaces. Depende do nível de privacidade desejado.
+      allow read: if request.auth != null;
+
+      // Cria: autenticado pode criar novo workspace (vira owner automaticamente via app.js)
+      allow create: if request.auth != null
+        && request.auth.uid != null;
+
+      // Atualiza/Deleta: só owner
       allow update, delete: if request.auth != null
-        && request.auth.uid == resource.data.ownerId;
+        && isOwnerOfWorkspace(wsId);
     }
 
-    // Agendamentos: só membros do mesmo workspace
-    match /appointments/{apptId} {
-      allow read, write: if request.auth != null
-        && request.auth.uid != null;
+    // ──────────────────────────────────────────────────────────────
+    // MEMBERS SUBCOLLECTION: gerenciado apenas pelo owner
+    // ──────────────────────────────────────────────────────────────
+    match /workspaces/{wsId}/members/{uid} {
+      // Lê: qualquer membro do workspace consegue ver a lista de equipe
+      allow read: if request.auth != null && isMemberOfWorkspace(wsId);
+
+      // Cria/Atualiza/Deleta: apenas owner
+      // (join via app.js passando código válido, mas Firestore valida)
+      allow create, update, delete: if request.auth != null
+        && isOwnerOfWorkspace(wsId);
     }
+
+    // ──────────────────────────────────────────────────────────────
+    // APPOINTMENTS: isolamento total por workspaceId + permissões específicas
+    // ──────────────────────────────────────────────────────────────
+    match /appointments/{apptId} {
+      // Precondição: documento deve existir e ter workspaceId definido
+      let apptData = resource.data;
+      let isValidAppt = apptData != null && apptData.workspaceId != null;
+
+      // Lê: membro do workspace + documento pertence àquele workspace
+      allow read: if request.auth != null
+        && isValidAppt
+        && isMemberOfWorkspace(apptData.workspaceId);
+
+      // Cria: membro do workspace + deve especificar seu próprio workspaceId e professionalUid
+      allow create: if request.auth != null
+        && request.resource.data.workspaceId != null
+        && isMemberOfWorkspace(request.resource.data.workspaceId)
+        && request.resource.data.professionalUid == request.auth.uid;
+
+      // Atualiza: apenas quem criou (professionalUid) ou owner do workspace
+      allow update: if request.auth != null
+        && isValidAppt
+        && (apptData.professionalUid == request.auth.uid
+          || isOwnerOfWorkspace(apptData.workspaceId));
+
+      // Deleta: apenas quem criou ou owner do workspace
+      allow delete: if request.auth != null
+        && isValidAppt
+        && (apptData.professionalUid == request.auth.uid
+          || isOwnerOfWorkspace(apptData.workspaceId));
+    }
+
   }
 }

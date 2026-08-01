@@ -3,20 +3,46 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sloti — Agenda Inteligente</title>
+<title>Scheduli — Agenda Inteligente</title>
 <meta name="theme-color" content="#D9A5B3">
 <link rel="manifest" href="./manifest.json">
-<link rel="apple-touch-icon" href="assets/sloti-icon.png">
+<link rel="apple-touch-icon" href="assets/scheduli-icon.png">
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500;600&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
-<link rel="icon" href="assets/sloti-icon.png" type="image/png">
+<link rel="icon" href="assets/scheduli-icon.png" type="image/png">
 
 <style>
 /* ═══════════════════════════════════════
    WORKSPACE SCREEN — estilos adicionais
 ═══════════════════════════════════════ */
+
+.team-code-box {
+  background: var(--rose-light);
+  border-radius: 14px;
+  padding: 16px 18px;
+}
+.team-code-box label { font-size: .78rem; color: var(--text-mid); font-weight: 600; }
+.team-code-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 6px; }
+.team-code-value { font-family: monospace; font-size: 1.3rem; font-weight: 700; letter-spacing: 2px; color: var(--rose-deep); }
+.team-code-status { font-size: .78rem; color: var(--text-muted); margin-top: 8px; }
+.team-code-status.danger { color: #C0394B; }
+.team-member-row { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.team-member-row:last-child { border-bottom: none; }
+.team-member-avatar {
+  width: 34px; height: 34px; border-radius: 50%; background: var(--rose);
+  color: #fff; font-size: .72rem; font-weight: 700;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.team-member-info { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.team-member-info strong { font-size: .88rem; }
+.team-member-info small { font-size: .74rem; color: var(--text-muted); }
+.btn-icon-remove {
+  background: none; border: none; color: #C0394B; font-size: 1.3rem;
+  cursor: pointer; line-height: 1; padding: 4px 8px; border-radius: 8px;
+}
+.btn-icon-remove:hover { background: #F5C6D0; }
 
 #workspace-screen {
   display: none;
@@ -234,7 +260,7 @@
 <!-- LOADING -->
 <div class="loading-overlay" id="loading">
   <div class="loading-spinner"></div>
-  <p>Carregando Sloti…</p>
+  <p>Carregando Scheduli…</p>
 </div>
 
 <!-- ══════════════════════════════════
@@ -244,9 +270,9 @@
   <div class="login-card">
     <div class="login-logo">
       <div class="logo-mark">
-        <img src="assets/sloti-icon.png" alt="Sloti" style="width:60px;height:60px">
+        <img src="assets/scheduli-icon.png" alt="Scheduli" style="width:60px;height:60px">
       </div>
-      <h1>sloti</h1>
+      <h1>Scheduli</h1>
       <p>Agenda inteligente para salões</p>
     </div>
 
@@ -304,7 +330,7 @@
 
     <div class="ws-logo">
       <div class="logo-mark">
-        <img src="assets/sloti-icon.png" alt="Sloti" style="width:60px;height:60px">
+        <img src="assets/scheduli-icon.png" alt="Scheduli" style="width:60px;height:60px">
       </div>
       <h2>Quase lá!</h2>
       <p>Configure seu espaço de trabalho para começar.</p>
@@ -395,9 +421,9 @@
   <header class="header">
     <div class="header-logo">
       <div class="logo-mark-sm">
-        <img src="assets/sloti-icon.png" alt="Sloti" width="35" height="35">
+        <img src="assets/scheduli-icon.png" alt="Scheduli" width="35" height="35">
       </div>
-      <span>sloti</span>
+      <span>Scheduli</span>
     </div>
 
     <div class="realtime-indicator">
@@ -442,10 +468,10 @@
             <small id="dd-email">—</small>
           </div>
 
-          <!-- Botão de convite (visível só para owner) -->
-          <div class="dropdown-item" id="dd-invite" onclick="copyWorkspaceCode()">
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-            Copiar código de convite
+          <!-- Botão de gestão de equipe/convite (visível só para owner) -->
+          <div class="dropdown-item" id="dd-invite" onclick="openTeamModal()">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+            Gerenciar equipe e convite
           </div>
           <div class="dropdown-divider"></div>
 
@@ -528,6 +554,39 @@
         Excluir
       </button>
       <button class="btn btn-ghost" onclick="closeModal('modal-detail')">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════
+     MODAL: EQUIPE E CONVITE (owner)
+══════════════════════════════════ -->
+<div class="modal-overlay" id="modal-team">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Equipe e convite</h2>
+      <button class="modal-close" onclick="closeModal('modal-team')">×</button>
+    </div>
+    <div class="modal-body">
+      <div class="team-code-box">
+        <label>Código de convite atual</label>
+        <div class="team-code-row">
+          <span id="team-code-display" class="team-code-value">—</span>
+          <button class="btn btn-ghost" style="padding:8px 14px" onclick="copyWorkspaceCode()">Copiar</button>
+        </div>
+        <p id="team-code-status" class="team-code-status"></p>
+        <button class="btn btn-ghost" style="width:100%;margin-top:10px" onclick="handleRegenerateCode()">
+          Gerar novo código (invalida o atual)
+        </button>
+      </div>
+
+      <div class="dropdown-divider" style="margin:20px 0"></div>
+
+      <label style="font-size:.8rem;color:var(--text-mid);font-weight:600">Membros da equipe</label>
+      <div id="team-members-list" style="margin-top:10px"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-ghost" onclick="closeModal('modal-team')">Fechar</button>
     </div>
   </div>
 </div>
