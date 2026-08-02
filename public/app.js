@@ -1,5 +1,5 @@
 /* ════════════════════════════════════════════════════════
-   SLOTI — app.js v2.0 (Workspaces)
+   SCHEDULI — app.js v3.0 (Workspaces)
 
    Fluxo do usuário:
    1. Login / Cadastro
@@ -47,6 +47,7 @@ import {
 } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 const INVITE_CODE_VALID_DAYS = 7;
+const TRIAL_DAYS = 7;
 
 // ──────────────────────────────────
 // FIREBASE
@@ -81,6 +82,31 @@ const State = {
 const HOURS      = ['08:00','09:00','10:00','11:00','12:00','13:00','14:00','15:00','16:00','17:00','18:00'];
 const START_HOUR = 8;
 const END_HOUR   = 18;
+
+// ──────────────────────────────────
+// TRIAL / PLANO
+// ──────────────────────────────────
+// Espelha a lógica das Firestore Rules — serve só para dar uma UX decente
+// (mostrar a tela de bloqueio certa). Quem realmente impede o acesso aos
+// dados são as Rules; isto aqui nunca deve ser a única linha de defesa.
+function trialEndDate(ws) {
+  if (!ws?.trialEndsAt) return null;
+  return typeof ws.trialEndsAt.toDate === 'function' ? ws.trialEndsAt.toDate() : new Date(ws.trialEndsAt);
+}
+function isWorkspaceActive(ws) {
+  if (!ws) return false;
+  if (ws.plan === 'paid') return true;
+  if (ws.plan === 'trial') {
+    const end = trialEndDate(ws);
+    return !!end && new Date() < end;
+  }
+  return false; // 'canceled' ou qualquer outro valor
+}
+function trialDaysLeft(ws) {
+  const end = trialEndDate(ws);
+  if (!end) return null;
+  return Math.max(0, Math.ceil((end - new Date()) / (24 * 60 * 60 * 1000)));
+}
 
 // ──────────────────────────────────
 // CAMADA DE DADOS
@@ -151,6 +177,9 @@ const DataLayer = {
 
   async createWorkspace(name, ownerUid, ownerName, ownerEmail) {
     const inviteCode = await this._uniqueInviteCode();
+    const trialEndsAt = Timestamp.fromDate(
+      new Date(Date.now() + TRIAL_DAYS * 24 * 60 * 60 * 1000)
+    );
 
     const ref = await addDoc(collection(db, 'workspaces'), {
       name,
@@ -158,7 +187,20 @@ const DataLayer = {
       inviteCode,
       inviteCodeActive:     true,
       inviteCodeExpiresAt:  this._inviteExpiry(),
+      plan:                 'trial',   // 'trial' | 'paid' | 'canceled'
+      trialEndsAt,
       createdAt:            serverTimestamp(),
+    });
+
+    // IMPORTANTE: a membership precisa ser criada ANTES de gravar
+    // workspaceId/role em users/{uid}, porque as Rules exigem que a
+    // membership já exista para aceitar essa escrita no doc do usuário.
+    await setDoc(doc(db, 'workspaces', ref.id, 'members', ownerUid), {
+      uid:       ownerUid,
+      name:      ownerName || '',
+      email:     ownerEmail || '',
+      role:      'owner',
+      joinedAt:  serverTimestamp(),
     });
 
     // Cria ou atualiza o doc do usuário com workspaceId e role owner
@@ -168,16 +210,7 @@ const DataLayer = {
       role:        'owner',
     }, { merge: true });
 
-    // Registra o owner na subcoleção de membros (para listagem/gestão de equipe)
-    await setDoc(doc(db, 'workspaces', ref.id, 'members', ownerUid), {
-      uid:       ownerUid,
-      name:      ownerName || '',
-      email:     ownerEmail || '',
-      role:      'owner',
-      joinedAt:  serverTimestamp(),
-    });
-
-    return { id: ref.id, name, ownerId: ownerUid, inviteCode };
+    return { id: ref.id, name, ownerId: ownerUid, inviteCode, plan: 'trial', trialEndsAt };
   },
 
   async joinWorkspace(inviteCode, uid, userName, userEmail) {
@@ -197,13 +230,9 @@ const DataLayer = {
       throw new Error('Este código de convite expirou. Peça um novo código para o responsável do salão.');
     }
 
-    // Cria ou atualiza o doc do usuário com workspaceId e role member
-    await setDoc(doc(db, 'users', uid), {
-      workspaceId: ws.id,
-      role:        'member',
-    }, { merge: true });
-
-    // Registra o membro na subcoleção de equipe do workspace
+    // Registra o membro na subcoleção de equipe do workspace ANTES de
+    // gravar workspaceId/role em users/{uid} (as Rules exigem a membership
+    // já existente para aceitar essa escrita no doc do usuário).
     await setDoc(doc(db, 'workspaces', ws.id, 'members', uid), {
       uid,
       name:      userName || '',
@@ -212,7 +241,14 @@ const DataLayer = {
       joinedAt:  serverTimestamp(),
     });
 
-    return { id: ws.id, name: ws.name, ownerId: ws.ownerId, inviteCode: ws.inviteCode };
+    // Cria ou atualiza o doc do usuário com workspaceId e role member
+    await setDoc(doc(db, 'users', uid), {
+      workspaceId: ws.id,
+      role:        'member',
+    }, { merge: true });
+
+    return { id: ws.id, name: ws.name, ownerId: ws.ownerId, inviteCode: ws.inviteCode,
+             plan: ws.plan, trialEndsAt: ws.trialEndsAt };
   },
 
   // Gera um novo código, invalidando o anterior (revogação implícita)
@@ -375,12 +411,30 @@ onAuthStateChanged(auth, async (firebaseUser) => {
     // Já tem workspace → carrega e entra no app
     try {
       const ws = await DataLayer.getWorkspace(userData.workspaceId);
-      if (ws) {
-        State.currentWorkspace = ws;
-        enterApp();
-      } else {
+      if (!ws) {
         // Workspace foi deletado (edge case)
         showScreen('workspace-screen');
+        return;
+      }
+
+      // Confere se a membership ainda existe (ex.: usuário foi removido
+      // do time por um owner). Se não existir mais, trata como se o
+      // usuário não tivesse workspace.
+      const memberSnap = await getDoc(doc(db, 'workspaces', ws.id, 'members', firebaseUser.uid));
+      if (!memberSnap.exists()) {
+        await setDoc(doc(db, 'users', firebaseUser.uid), { workspaceId: null, role: null }, { merge: true }).catch(() => {});
+        State.currentUser.workspaceId = null;
+        State.currentUser.role = null;
+        showScreen('workspace-screen');
+        return;
+      }
+
+      State.currentWorkspace = ws;
+
+      if (!isWorkspaceActive(ws)) {
+        showTrialExpiredScreen(ws);
+      } else {
+        enterApp();
       }
     } catch(_) {
       showScreen('workspace-screen');
@@ -389,10 +443,27 @@ onAuthStateChanged(auth, async (firebaseUser) => {
 });
 
 // ──────────────────────────────────
+// TRIAL EXPIRADO / PLANO INATIVO
+// ──────────────────────────────────
+function showTrialExpiredScreen(ws) {
+  showScreen('trial-expired-screen');
+  const titleEl = document.getElementById('trial-expired-title');
+  const msgEl   = document.getElementById('trial-expired-msg');
+  if (ws.plan === 'trial') {
+    if (titleEl) titleEl.textContent = 'Seu período de teste terminou';
+    if (msgEl)   msgEl.textContent   = `O teste gratuito de ${TRIAL_DAYS} dias do salão "${ws.name}" chegou ao fim. Fale com a gente para continuar usando o Scheduli.`;
+  } else {
+    if (titleEl) titleEl.textContent = 'Assinatura inativa';
+    if (msgEl)   msgEl.textContent   = `O acesso do salão "${ws.name}" está pausado no momento. Fale com a gente para reativar.`;
+  }
+}
+window.showTrialExpiredScreen = showTrialExpiredScreen;
+
+// ──────────────────────────────────
 // TELAS
 // ──────────────────────────────────
 function showScreen(id) {
-  ['loading','login-screen','workspace-screen','app'].forEach(s => {
+  ['loading','login-screen','workspace-screen','trial-expired-screen','app'].forEach(s => {
     const el = document.getElementById(s);
     if (!el) return;
     if (s === 'app') el.classList.remove('visible');
@@ -576,8 +647,24 @@ function enterApp() {
   document.getElementById('f-prof-option').textContent = user.name;
   document.getElementById('f-prof-option').value       = user.uid;
 
+  updateTrialBanner(ws);
   showScreen('app');
   goToToday();
+}
+
+// Banner discreto de dias restantes de trial (some quando plan === 'paid')
+function updateTrialBanner(ws) {
+  const banner = document.getElementById('trial-banner');
+  if (!banner) return;
+  if (!ws || ws.plan !== 'trial') {
+    banner.style.display = 'none';
+    return;
+  }
+  const days = trialDaysLeft(ws);
+  banner.textContent = days === 0
+    ? 'Seu teste grátis termina hoje.'
+    : `Seu teste grátis termina em ${days} dia${days === 1 ? '' : 's'}.`;
+  banner.style.display = 'block';
 }
 
 // Copia código de convite do workspace atual (ação do dropdown)
@@ -845,6 +932,13 @@ async function saveAppointment() {
   if (toMinutes(start) > END_HOUR * 60) return showModalError('Horário máximo: 18:00.');
 
   const dateStr = formatDate(State.currentDate);
+
+  // Ao editar, preserva o profissional original do agendamento — só o
+  // owner editando via um fluxo de reatribuição explícito (não existe
+  // ainda) deveria poder trocar isso. Sem essa preservação, editar um
+  // agendamento de outra pessoa acabava "transferindo" ele para quem editou.
+  const existing = State.editingId ? State.appointments.find(a => a.id === State.editingId) : null;
+
   const data = {
     clientName:       client,
     procedure,
@@ -852,8 +946,8 @@ async function saveAppointment() {
     startTime:        start,
     date:             dateStr,
     workspaceId:      State.currentUser.workspaceId,
-    professionalUid:  State.currentUser.uid,
-    professionalName: State.currentUser.name,
+    professionalUid:  existing ? existing.professionalUid  : State.currentUser.uid,
+    professionalName: existing ? existing.professionalName : State.currentUser.name,
   };
 
   try {

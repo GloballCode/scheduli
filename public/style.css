@@ -1,4 +1,3 @@
-
 /* DESIGN TOKENS & VARIÁVEIS */
 :root {
   --bg: #FAF8F6;
@@ -94,6 +93,65 @@ body {
   color: var(--text);
   letter-spacing: -0.02em;
   line-height: 1;
+}
+
+/* ═══════════════════════════════════════════
+   TELA DE TRIAL EXPIRADO / PLANO INATIVO
+═══════════════════════════════════════════ */
+#trial-expired-screen {
+  display: none; /* ativado via showScreen() */
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  background: linear-gradient(135deg, #FAF8F6 0%, #F3EDE8 50%, #F5E8ED 100%);
+  padding: 24px;
+}
+
+.trial-expired-card {
+  background: var(--card);
+  border-radius: 24px;
+  padding: 48px 40px;
+  width: 100%;
+  max-width: 420px;
+  text-align: center;
+  box-shadow: var(--shadow-lg);
+  border: 1px solid var(--border);
+  animation: fadeUp 0.5s ease;
+}
+
+.trial-expired-icon {
+  font-size: 2.4rem;
+  margin-bottom: 18px;
+}
+
+.trial-expired-card h2 {
+  font-family: var(--font-display);
+  font-size: 1.6rem;
+  font-weight: 500;
+  color: var(--text);
+  margin: 0 0 12px;
+}
+
+.trial-expired-card p {
+  font-size: 0.88rem;
+  color: var(--text-muted);
+  line-height: 1.6;
+  margin: 0 0 28px;
+}
+
+.trial-expired-card .btn {
+  width: 100%;
+  justify-content: center;
+}
+
+/* Banner discreto de dias restantes de trial, dentro do app */
+#trial-banner {
+  background: var(--rose-light);
+  color: var(--rose-dark);
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-align: center;
+  padding: 8px 16px;
 }
 
 .login-logo p {

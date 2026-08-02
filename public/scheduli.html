@@ -414,9 +414,27 @@
 </div>
 
 <!-- ══════════════════════════════════
+     TELA DE TRIAL EXPIRADO / PLANO INATIVO
+══════════════════════════════════ -->
+<div id="trial-expired-screen">
+  <div class="trial-expired-card">
+    <div class="trial-expired-icon">⏳</div>
+    <h2 id="trial-expired-title">Seu período de teste terminou</h2>
+    <p id="trial-expired-msg">O teste gratuito chegou ao fim. Fale com a gente para continuar usando o Scheduli.</p>
+    <a class="btn btn-primary" href="https://wa.me/5584986634267" target="_blank" rel="noopener">
+      Falar no WhatsApp
+    </a>
+    <button class="btn btn-ghost" onclick="handleLogout()" style="margin-top:10px">Sair</button>
+  </div>
+</div>
+
+<!-- ══════════════════════════════════
      APP PRINCIPAL
 ══════════════════════════════════ -->
 <div id="app">
+  <!-- BANNER DE TRIAL (aparece só quando plan === 'trial') -->
+  <div id="trial-banner" style="display:none"></div>
+
   <!-- HEADER -->
   <header class="header">
     <div class="header-logo">
