@@ -2,6 +2,7 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+<<<<<<< HEAD
     // ==========================
     // HELPER FUNCTIONS
     // ==========================
@@ -81,6 +82,138 @@ service cloud.firestore {
           resource.data.professionalUid == request.auth.uid
           || isOwnerOfWorkspace(resource.data.workspaceId)
         );
+=======
+    // ──────────────────────────────────
+    // HELPERS
+    // ──────────────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function myWorkspaceId() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.workspaceId;
+    }
+
+    function myRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function isMemberOf(wsId) {
+      return isSignedIn() && myWorkspaceId() == wsId;
+    }
+
+    function isOwnerOf(wsId) {
+      return isMemberOf(wsId) && myRole() == 'owner';
+    }
+
+    // ── Trial / assinatura ──
+    function workspaceData(wsId) {
+      return get(/databases/$(database)/documents/workspaces/$(wsId)).data;
+    }
+
+    function isWorkspaceActive(wsId) {
+      let ws = workspaceData(wsId);
+      return ws.plan == 'paid'
+        || (ws.plan == 'trial' && request.time < ws.trialEndsAt);
+    }
+
+    // ──────────────────────────────────
+    // USERS
+    // ──────────────────────────────────
+    match /users/{userId} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+
+      // Cadastro inicial: sempre sem workspace/role ainda
+      allow create: if isSignedIn() && request.auth.uid == userId
+        && request.resource.data.workspaceId == null
+        && request.resource.data.role == null;
+
+      // Só aceita workspaceId/role se já existir a membership correspondente
+      // (impede o usuário de se autoatribuir a um workspace/role qualquer)
+      allow update: if isSignedIn() && request.auth.uid == userId
+        && (
+             request.resource.data.workspaceId == null
+             || (
+                  exists(/databases/$(database)/documents/workspaces/$(request.resource.data.workspaceId)/members/$(request.auth.uid))
+                  && request.resource.data.role ==
+                     get(/databases/$(database)/documents/workspaces/$(request.resource.data.workspaceId)/members/$(request.auth.uid)).data.role
+                )
+           );
+
+      allow delete: if false;
+    }
+
+    // ──────────────────────────────────
+    // WORKSPACES
+    // ──────────────────────────────────
+    match /workspaces/{wsId} {
+      // Leitura aberta a qualquer autenticado: necessário para a busca por
+      // inviteCode (join) e para o app conseguir ler plan/trialEndsAt antes
+      // de o usuário ser oficialmente membro. NÃO expõe appointments —
+      // esses ficam travados abaixo por isMemberOf + isWorkspaceActive.
+      allow get:  if isSignedIn();
+      allow list: if isSignedIn();
+
+      allow create: if isSignedIn()
+        && request.resource.data.ownerId == request.auth.uid
+        && request.resource.data.plan == 'trial';
+
+      // Owner pode atualizar (regenerar código, etc), mas nunca trocar o dono
+      // nem se auto-promover de plano (isso é feito manualmente no console
+      // com uma conta admin/Firebase, fora das Rules do client).
+      allow update: if isSignedIn() && resource.data.ownerId == request.auth.uid
+        && request.resource.data.ownerId == resource.data.ownerId
+        && request.resource.data.plan == resource.data.plan
+        && request.resource.data.trialEndsAt == resource.data.trialEndsAt;
+
+      allow delete: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+
+      match /members/{memberId} {
+        allow read: if isMemberOf(wsId);
+
+        // Cada um só cria a própria membership; role tem que bater com
+        // ser ou não o dono do workspace.
+        allow create: if isSignedIn() && request.auth.uid == memberId
+          && (
+               (get(/databases/$(database)/documents/workspaces/$(wsId)).data.ownerId == request.auth.uid
+                 && request.resource.data.role == 'owner')
+               ||
+               (get(/databases/$(database)/documents/workspaces/$(wsId)).data.ownerId != request.auth.uid
+                 && request.resource.data.role == 'member')
+             );
+
+        allow update: if isOwnerOf(wsId);
+
+        // Owner remove qualquer membro; qualquer membro pode sair sozinho.
+        allow delete: if isOwnerOf(wsId)
+          || (isSignedIn() && request.auth.uid == memberId);
+      }
+    }
+
+    // ──────────────────────────────────
+    // APPOINTMENTS
+    // ──────────────────────────────────
+    match /appointments/{apptId} {
+      allow read: if isMemberOf(resource.data.workspaceId)
+        && isWorkspaceActive(resource.data.workspaceId);
+
+      allow create: if isMemberOf(request.resource.data.workspaceId)
+        && request.resource.data.professionalUid == request.auth.uid
+        && isWorkspaceActive(request.resource.data.workspaceId);
+
+      // Só o próprio profissional dono do agendamento ou o owner do
+      // workspace podem editar; e só o owner pode reatribuir para outro
+      // profissional.
+      allow update: if isMemberOf(resource.data.workspaceId)
+        && isWorkspaceActive(resource.data.workspaceId)
+        && request.resource.data.workspaceId == resource.data.workspaceId
+        && (resource.data.professionalUid == request.auth.uid || isOwnerOf(resource.data.workspaceId))
+        && (request.resource.data.professionalUid == resource.data.professionalUid || isOwnerOf(resource.data.workspaceId));
+
+      allow delete: if isMemberOf(resource.data.workspaceId)
+        && isWorkspaceActive(resource.data.workspaceId)
+        && (resource.data.professionalUid == request.auth.uid || isOwnerOf(resource.data.workspaceId));
+>>>>>>> ee687fd34a80d50c1a1522d297922e2c2e2b8d10
     }
   }
 }
